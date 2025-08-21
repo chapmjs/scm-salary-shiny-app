@@ -1,37 +1,16 @@
 # SCM Salary Analysis Shiny App
 # Interactive dashboard for Supply Chain Management salary data from BLS
 
-# Install and load required libraries with robust error handling
-install_and_load <- function(package_name, github_repo = NULL) {
-  if (!require(package_name, character.only = TRUE, quietly = TRUE)) {
-    if (!is.null(github_repo)) {
-      # GitHub package
-      if (!require(devtools, quietly = TRUE)) {
-        install.packages("devtools")
-        library(devtools)
-      }
-      message(paste("Installing", package_name, "from GitHub:", github_repo))
-      devtools::install_github(github_repo)
-    } else {
-      # CRAN package
-      message(paste("Installing", package_name, "from CRAN"))
-      install.packages(package_name)
-    }
-    library(package_name, character.only = TRUE)
-  } else {
-    library(package_name, character.only = TRUE)
-  }
-}
-
-# Install/load packages
-install_and_load("shiny")
-install_and_load("shinydashboard")
-install_and_load("DT")
-install_and_load("plotly")
-install_and_load("blsAPI", "mikeasilva/blsAPI")  # GitHub package
-install_and_load("tidyverse")
-install_and_load("jsonlite")
-install_and_load("scales")
+# Load required libraries
+# All packages should be pre-installed before deployment
+library(shiny)
+library(shinydashboard)
+library(DT)
+library(plotly)
+library(blsAPI)
+library(tidyverse)
+library(jsonlite)
+library(scales)
 
 # Load API key from environment variable
 # Set BLS_KEY environment variable in Posit Connect Cloud

@@ -1,0 +1,6 @@
+Package: SCMSalaryApp
+Type: Shiny
+Title: SCM Salary Analysis Dashboard
+Version: 1.0.0
+Imports: shiny, shinydashboard, DT, plotly, tidyverse, jsonlite, scales
+Remotes: mikeasilva/blsAPI
