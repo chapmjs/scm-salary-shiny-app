@@ -1,215 +1,171 @@
-# SCM Salary Analysis Shiny App
-# Interactive dashboard for Supply Chain Management salary data from BLS
+# SCM Salary Analysis Shiny App - Database Version
+# Interactive dashboard for Supply Chain Management salary data from MySQL database
 
-# Load required libraries with GitHub package handling
+# Load required libraries
 library(shiny)
 library(shinydashboard)
 library(DT)
 library(plotly)
 library(tidyverse)
-library(jsonlite)
 library(scales)
+library(RMySQL)
+library(DBI)
+library(pool)
 
-# Handle blsAPI installation for Connect Cloud
-if (!requireNamespace("blsAPI", quietly = TRUE)) {
-  # Only try to install if we have devtools and internet access
-  if (requireNamespace("devtools", quietly = TRUE)) {
-    tryCatch({
-      devtools::install_github("mikeasilva/blsAPI", quiet = TRUE)
-      library(blsAPI)
-    }, error = function(e) {
-      stop("Unable to install blsAPI package. Please contact administrator.")
-    })
+# Database configuration
+DB_CONFIG <- list(
+  host = Sys.getenv("MYSQL_HOST"),
+  dbname = Sys.getenv("MYSQL_DATABASE"),
+  username = Sys.getenv("MYSQL_USERNAME"),
+  password = Sys.getenv("MYSQL_PASSWORD")
+)
+
+# Check database configuration
+check_db_config <- function() {
+  required_vars <- c("MYSQL_HOST", "MYSQL_DATABASE", "MYSQL_USERNAME", "MYSQL_PASSWORD")
+  missing_vars <- required_vars[sapply(required_vars, function(x) Sys.getenv(x) == "")]
+  
+  if(length(missing_vars) > 0) {
+    stop(paste("Missing required environment variables:", paste(missing_vars, collapse = ", ")))
+  }
+  
+  return(TRUE)
+}
+
+# Create database connection pool
+create_db_pool <- function() {
+  check_db_config()
+  
+  tryCatch({
+    pool <- dbPool(
+      drv = MySQL(),
+      host = DB_CONFIG$host,
+      dbname = DB_CONFIG$dbname,
+      username = DB_CONFIG$username,
+      password = DB_CONFIG$password,
+      maxSize = 10
+    )
+    return(pool)
+  }, error = function(e) {
+    stop(paste("Failed to create database connection pool:", e$message))
+  })
+}
+
+# Database query functions
+get_available_years <- function(pool) {
+  query <- "SELECT DISTINCT data_year FROM scm_salary_data ORDER BY data_year DESC"
+  result <- dbGetQuery(pool, query)
+  return(result$data_year)
+}
+
+get_occupation_categories <- function(pool) {
+  query <- "SELECT DISTINCT occupation_category FROM occupation_definitions WHERE is_active = TRUE"
+  result <- dbGetQuery(pool, query)
+  return(result$occupation_category)
+}
+
+get_scm_data_from_db <- function(pool, year, occupation_set = "both") {
+  # Build the occupation filter
+  if (occupation_set == "both") {
+    occupation_filter <- ""
   } else {
-    stop("blsAPI package not available and devtools not found.")
-  }
-} else {
-  library(blsAPI)
-}
-
-# Load API key from environment variable
-# Set BLS_KEY environment variable in Posit Connect Cloud
-if(Sys.getenv("BLS_KEY") == "") {
-  warning("BLS API key not found. Please set BLS_KEY environment variable in Posit Connect Cloud.")
-}
-
-# Define Supply Chain Management occupations
-scm_occupations <- list(
-  # Core SCM Management
-  "11-3061" = "Purchasing Managers",
-  "11-3071" = "Transportation, Storage, and Distribution Managers", 
-  "11-9199" = "Managers, All Other (includes Operations Managers)",
-  
-  # Core SCM Professional/Analytical
-  "13-1081" = "Logisticians",
-  "13-1023" = "Purchasing Agents, Except Wholesale, Retail, and Farm Products",
-  "13-1022" = "Wholesale and Retail Buyers, Except Farm Products",
-  "13-1199" = "Business Operations Specialists, All Other (includes Supply Chain Analysts)",
-  
-  # SCM-Adjacent Analytical Roles
-  "13-1111" = "Management Analysts (often work on supply chain optimization)",
-  "15-2031" = "Operations Research Analysts",
-  "17-2112" = "Industrial Engineers",
-  
-  # Core SCM Operational/Support
-  "43-5011" = "Cargo and Freight Agents",
-  "43-5061" = "Production, Planning, and Expediting Clerks",
-  "43-5071" = "Shipping, Receiving, and Traffic Clerks",
-  "53-1047" = "Traffic Technicians"
-)
-
-extended_scm_occupations <- list(
-  "13-1021" = "Buyers and Purchasing Agents, Farm Products",
-  "43-5021" = "Couriers and Messengers", 
-  "43-5052" = "Postal Service Mail Carriers",
-  "53-7064" = "Packers and Packagers, Hand",
-  "53-7065" = "Stockers and Order Fillers"
-)
-
-# Core functions from original script
-construct_series_ids <- function(occupation_code) {
-  clean_code <- sprintf("%06s", gsub("-", "", occupation_code))
-  base_id <- paste0("OEUN0000000000000", clean_code)
-  series_ids <- paste0(base_id, c("01", "04", "13"))
-  names(series_ids) <- c("employment", "mean_wage", "median_wage")
-  return(series_ids)
-}
-
-get_occupation_data <- function(occupation_code, year, max_retries = 3) {
-  series_ids <- construct_series_ids(occupation_code)
-  
-  payload <- list(
-    'seriesid' = as.vector(series_ids),
-    'startyear' = as.character(year),
-    'endyear' = as.character(year),
-    'registrationKey' = Sys.getenv("BLS_KEY")
-  )
-  
-  for(attempt in 1:max_retries) {
-    tryCatch({
-      response <- blsAPI(payload, api_version = 2)
-      json_data <- fromJSON(response)
-      
-      if(json_data$status == "REQUEST_SUCCEEDED") {
-        return(json_data)
-      } else {
-        if(attempt == max_retries) return(NULL)
-      }
-    }, error = function(e) {
-      if(attempt == max_retries) return(NULL)
-      Sys.sleep(1)
-    })
-  }
-  return(NULL)
-}
-
-process_occupation_data <- function(api_response, occupation_code, occupation_name) {
-  if(is.null(api_response) || is.null(api_response$Results) || is.null(api_response$Results$series)) {
-    return(data.frame(
-      occupation_code = occupation_code,
-      occupation_name = occupation_name,
-      employment = NA,
-      median_wage = NA,
-      mean_wage = NA,
-      data_available = FALSE
-    ))
+    occupation_filter <- paste0("AND od.occupation_category = '", occupation_set, "'")
   }
   
-  series_df <- api_response$Results$series
+  query <- paste0("
+    SELECT 
+      sd.occupation_code,
+      od.occupation_name,
+      od.occupation_category,
+      od.occupation_level,
+      od.scm_function,
+      sd.employment,
+      sd.median_wage,
+      sd.mean_wage,
+      sd.median_hourly,
+      sd.mean_hourly,
+      sd.wage_ratio,
+      sd.wage_distribution,
+      sd.data_available,
+      sd.updated_date
+    FROM scm_salary_data sd
+    JOIN occupation_definitions od ON sd.occupation_code = od.occupation_code
+    WHERE sd.data_year = ", year, "
+      AND od.is_active = TRUE
+      ", occupation_filter, "
+    ORDER BY sd.median_wage DESC
+  ")
   
-  if(!is.data.frame(series_df) || nrow(series_df) == 0) {
-    return(data.frame(
-      occupation_code = occupation_code,
-      occupation_name = occupation_name,
-      employment = NA,
-      median_wage = NA,
-      mean_wage = NA,
-      data_available = FALSE
-    ))
-  }
+  result <- dbGetQuery(pool, query)
   
-  results <- list(employment = NA, median_wage = NA, mean_wage = NA)
+  # Convert data types and add calculated fields
+  result <- result %>%
+    mutate(
+      employment = as.numeric(employment),
+      median_wage = as.numeric(median_wage),
+      mean_wage = as.numeric(mean_wage),
+      median_hourly = as.numeric(median_hourly),
+      mean_hourly = as.numeric(mean_hourly),
+      wage_ratio = as.numeric(wage_ratio),
+      data_available = as.logical(data_available),
+      # Add occupation level if not in database
+      occupation_level = case_when(
+        !is.na(occupation_level) ~ occupation_level,
+        str_detect(occupation_code, "^11-") ~ "Management",
+        str_detect(occupation_code, "^13-1081|^13-1023|^13-1022|^13-1199") ~ "Core SCM Professional",
+        str_detect(occupation_code, "^13-1111|^15-2031|^17-2112") ~ "SCM-Adjacent Analytical",
+        str_detect(occupation_code, "^43-|^53-") ~ "Operational/Support",
+        TRUE ~ "Other"
+      ),
+      # Add SCM function if not in database
+      scm_function = case_when(
+        !is.na(scm_function) ~ scm_function,
+        str_detect(occupation_code, "^11-3061|^13-1023|^13-1022") ~ "Procurement & Sourcing",
+        str_detect(occupation_code, "^11-3071|^43-5011|^43-5071|^53-1047") ~ "Transportation & Logistics",
+        str_detect(occupation_code, "^13-1081") ~ "Supply Chain Planning",
+        str_detect(occupation_code, "^43-5061") ~ "Production Planning",
+        str_detect(occupation_code, "^13-1199") ~ "Supply Chain Analysis",
+        str_detect(occupation_code, "^13-1111|^15-2031|^17-2112") ~ "Process Optimization",
+        str_detect(occupation_code, "^11-9199") ~ "General Operations",
+        TRUE ~ "Other SCM Functions"
+      )
+    )
   
-  for(i in 1:nrow(series_df)) {
-    tryCatch({
-      series_id <- series_df$seriesID[i]
-      
-      if(!"data" %in% names(series_df) || !is.list(series_df$data)) {
-        next
-      }
-      
-      series_data <- series_df$data[[i]]
-      
-      if(is.null(series_data) || !is.data.frame(series_data) || nrow(series_data) == 0 || !"value" %in% names(series_data)) {
-        next
-      }
-      
-      raw_value <- series_data$value[1]
-      if(is.na(raw_value) || raw_value == "" || raw_value == "-") {
-        next
-      }
-      
-      value <- as.numeric(raw_value)
-      if(is.na(value)) {
-        next
-      }
-      
-      if(grepl("01$", series_id)) {
-        results$employment <- value
-      } else if(grepl("04$", series_id)) {
-        results$mean_wage <- value
-      } else if(grepl("13$", series_id)) {
-        results$median_wage <- value
-      }
-      
-    }, error = function(e) {
-      # Continue with next series
-    })
-  }
-  
-  return(data.frame(
-    occupation_code = occupation_code,
-    occupation_name = occupation_name,
-    employment = results$employment,
-    median_wage = results$median_wage,
-    mean_wage = results$mean_wage,
-    data_available = !all(is.na(c(results$employment, results$median_wage, results$mean_wage)))
-  ))
+  return(result)
 }
 
-analyze_all_occupations <- function(occupations_list, year, progress = NULL) {
-  all_results <- list()
+get_refresh_log <- function(pool, limit = 10) {
+  query <- paste0("
+    SELECT 
+      data_year,
+      occupation_set,
+      occupations_requested,
+      occupations_successful,
+      refresh_status,
+      refresh_date,
+      refresh_duration_seconds
+    FROM data_refresh_log 
+    ORDER BY refresh_date DESC 
+    LIMIT ", limit)
   
-  for(i in seq_along(occupations_list)) {
-    code <- names(occupations_list)[i]
-    name <- occupations_list[[code]]
-    
-    if(!is.null(progress)) {
-      progress$inc(1/length(occupations_list), detail = paste("Analyzing:", name))
-    }
-    
-    if(i > 1) Sys.sleep(0.5)
-    
-    raw_data <- get_occupation_data(code, year)
-    processed_data <- process_occupation_data(raw_data, code, name)
-    
-    all_results[[i]] <- processed_data
-  }
-  
-  final_results <- do.call(rbind, all_results)
-  return(final_results)
+  result <- dbGetQuery(pool, query)
+  return(result)
 }
+
+# Create database pool
+db_pool <- create_db_pool()
 
 # UI
 ui <- dashboardPage(
-  dashboardHeader(title = "SCM Salary Analysis Dashboard"),
+  dashboardHeader(title = "SCM Salary Analysis Dashboard - Database Edition"),
   
   dashboardSidebar(
     sidebarMenu(
       menuItem("Overview", tabName = "overview", icon = icon("dashboard")),
       menuItem("Detailed Analysis", tabName = "detailed", icon = icon("table")),
       menuItem("Comparisons", tabName = "comparisons", icon = icon("chart-bar")),
-      menuItem("Data Export", tabName = "export", icon = icon("download"))
+      menuItem("Data Export", tabName = "export", icon = icon("download")),
+      menuItem("Data Status", tabName = "status", icon = icon("database"))
     )
   ),
   
@@ -230,21 +186,14 @@ ui <- dashboardPage(
                   title = "Analysis Controls", status = "primary", solidHeader = TRUE, width = 12,
                   fluidRow(
                     column(3,
-                           numericInput("analysis_year", "Analysis Year:", 
-                                        value = 2024, min = 2015, max = 2024)
+                           uiOutput("year_selector")
                     ),
                     column(3,
-                           selectInput("occupation_set", "Occupation Set:",
-                                       choices = list(
-                                         "Core SCM Only" = "core",
-                                         "Extended SCM" = "extended",
-                                         "Both Core & Extended" = "both"
-                                       ),
-                                       selected = "core")
+                           uiOutput("occupation_set_selector")
                     ),
                     column(3,
                            br(),
-                           actionButton("analyze_btn", "Run Analysis", 
+                           actionButton("analyze_btn", "Load Data", 
                                         class = "btn-primary", style = "margin-top: 5px;")
                     ),
                     column(3,
@@ -369,6 +318,30 @@ ui <- dashboardPage(
                   DT::dataTableOutput("export_preview")
                 )
               )
+      ),
+      
+      # Data Status Tab
+      tabItem(tabName = "status",
+              fluidRow(
+                box(
+                  title = "Database Connection Status", 
+                  status = "primary", solidHeader = TRUE, width = 6,
+                  verbatimTextOutput("db_status")
+                ),
+                box(
+                  title = "Available Data Years", 
+                  status = "info", solidHeader = TRUE, width = 6,
+                  DT::dataTableOutput("available_years_table")
+                )
+              ),
+              
+              fluidRow(
+                box(
+                  title = "Recent Data Refreshes", 
+                  status = "success", solidHeader = TRUE, width = 12,
+                  DT::dataTableOutput("refresh_log_table")
+                )
+              )
       )
     )
   )
@@ -379,81 +352,175 @@ server <- function(input, output, session) {
   # Reactive values
   values <- reactiveValues(
     scm_data = NULL,
-    analysis_complete = FALSE
+    analysis_complete = FALSE,
+    available_years = NULL,
+    available_categories = NULL
   )
   
-  # Run analysis when button is clicked
-  observeEvent(input$analyze_btn, {
-    if(Sys.getenv("BLS_KEY") == "") {
-      showNotification("BLS API key not found. Please set BLS_KEY environment variable.", 
-                       type = "message", duration = 10)
-      return()
+  # Initialize available years and categories
+  observe({
+    tryCatch({
+      values$available_years <- get_available_years(db_pool)
+      values$available_categories <- get_occupation_categories(db_pool)
+    }, error = function(e) {
+      showNotification(paste("Database connection error:", e$message), type = "error")
+    })
+  })
+  
+  # Dynamic UI for year selection
+  output$year_selector <- renderUI({
+    if(is.null(values$available_years)) {
+      numericInput("analysis_year", "Analysis Year:", value = 2024, min = 2015, max = 2024)
+    } else {
+      selectInput("analysis_year", "Analysis Year:", 
+                  choices = setNames(values$available_years, values$available_years),
+                  selected = max(values$available_years))
     }
+  })
+  
+  # Dynamic UI for occupation set selection
+  output$occupation_set_selector <- renderUI({
+    if(is.null(values$available_categories)) {
+      selectInput("occupation_set", "Occupation Set:",
+                  choices = list("Core SCM Only" = "core", "Extended SCM" = "extended", "Both Core & Extended" = "both"),
+                  selected = "core")
+    } else {
+      choices <- list("Both Core & Extended" = "both")
+      for(cat in values$available_categories) {
+        choices[[paste(str_to_title(cat), "SCM")]] <- cat
+      }
+      selectInput("occupation_set", "Occupation Set:", choices = choices, selected = "both")
+    }
+  })
+  
+  # Load data when button is clicked
+  observeEvent(input$analyze_btn, {
+    req(input$analysis_year, input$occupation_set)
     
     # Show progress
     progress <- Progress$new(session)
-    progress$set(message = "Fetching data from BLS API...", value = 0)
+    progress$set(message = "Loading data from database...", value = 0.5)
     on.exit(progress$close())
     
-    # Determine which occupations to analyze
-    occupations_to_use <- switch(input$occupation_set,
-                                 "core" = scm_occupations,
-                                 "extended" = extended_scm_occupations,
-                                 "both" = c(scm_occupations, extended_scm_occupations)
-    )
-    
-    # Analyze occupations
-    raw_data <- analyze_all_occupations(occupations_to_use, input$analysis_year, progress)
-    
-    # Add calculated fields
-    processed_data <- raw_data %>%
-      mutate(
-        median_hourly = median_wage / 2080,
-        mean_hourly = mean_wage / 2080,
-        wage_ratio = mean_wage / median_wage,
-        wage_distribution = case_when(
-          wage_ratio > 1.15 ~ "Right-skewed (high earners)",
-          wage_ratio < 0.85 ~ "Left-skewed (compressed)",
-          TRUE ~ "Relatively symmetric"
-        ),
-        occupation_level = case_when(
-          str_detect(occupation_code, "^11-") ~ "Management",
-          str_detect(occupation_code, "^13-1081|^13-1023|^13-1022|^13-1199") ~ "Core SCM Professional",
-          str_detect(occupation_code, "^13-1111|^15-2031|^17-2112") ~ "SCM-Adjacent Analytical",
-          str_detect(occupation_code, "^43-|^53-") ~ "Operational/Support",
-          TRUE ~ "Other"
-        ),
-        scm_function = case_when(
-          str_detect(occupation_code, "^11-3061|^13-1023|^13-1022") ~ "Procurement & Sourcing",
-          str_detect(occupation_code, "^11-3071|^43-5011|^43-5071|^53-1047") ~ "Transportation & Logistics",
-          str_detect(occupation_code, "^13-1081") ~ "Supply Chain Planning",
-          str_detect(occupation_code, "^43-5061") ~ "Production Planning",
-          str_detect(occupation_code, "^13-1199") ~ "Supply Chain Analysis",
-          str_detect(occupation_code, "^13-1111|^15-2031|^17-2112") ~ "Process Optimization",
-          str_detect(occupation_code, "^11-9199") ~ "General Operations",
-          TRUE ~ "Other SCM Functions"
-        )
-      ) %>%
-      arrange(desc(median_wage))
-    
-    values$scm_data <- processed_data
-    values$analysis_complete <- TRUE
-    
-    showNotification("Analysis complete!", type = "message")
+    tryCatch({
+      # Load data from database
+      raw_data <- get_scm_data_from_db(db_pool, input$analysis_year, input$occupation_set)
+      
+      if(nrow(raw_data) == 0) {
+        showNotification(paste("No data found for year", input$analysis_year, "and occupation set", input$occupation_set), 
+                         type = "warning")
+        return()
+      }
+      
+      # Filter for available data and arrange
+      processed_data <- raw_data %>%
+        filter(data_available == TRUE) %>%
+        arrange(desc(median_wage))
+      
+      values$scm_data <- processed_data
+      values$analysis_complete <- TRUE
+      
+      showNotification(paste("Loaded", nrow(processed_data), "occupations with data!"), type = "message")
+      
+    }, error = function(e) {
+      showNotification(paste("Error loading data:", e$message), type = "error")
+    })
   })
   
-  # Value boxes
+  # Database status
+  output$db_status <- renderText({
+    tryCatch({
+      # Test database connection
+      test_query <- dbGetQuery(db_pool, "SELECT COUNT(*) as count FROM occupation_definitions")
+      occupation_count <- test_query$count
+      
+      # Get data summary
+      summary_query <- dbGetQuery(db_pool, "
+        SELECT 
+          COUNT(DISTINCT data_year) as years_available,
+          COUNT(*) as total_records,
+          SUM(CASE WHEN data_available = TRUE THEN 1 ELSE 0 END) as records_with_data
+        FROM scm_salary_data
+      ")
+      
+      paste(
+        "✓ Database connection: SUCCESS",
+        paste("✓ Occupation definitions:", occupation_count),
+        paste("✓ Data years available:", summary_query$years_available),
+        paste("✓ Total salary records:", summary_query$total_records),
+        paste("✓ Records with data:", summary_query$records_with_data),
+        paste("✓ Database:", DB_CONFIG$dbname, "@", DB_CONFIG$host),
+        sep = "\n"
+      )
+    }, error = function(e) {
+      paste("✗ Database connection: FAILED", paste("Error:", e$message), sep = "\n")
+    })
+  })
+  
+  # Available years table
+  output$available_years_table <- DT::renderDataTable({
+    tryCatch({
+      query <- "
+        SELECT 
+          data_year,
+          COUNT(*) as total_occupations,
+          SUM(CASE WHEN data_available = TRUE THEN 1 ELSE 0 END) as with_data,
+          MAX(updated_date) as last_updated
+        FROM scm_salary_data 
+        GROUP BY data_year 
+        ORDER BY data_year DESC
+      "
+      result <- dbGetQuery(db_pool, query)
+      
+      result %>%
+        mutate(
+          coverage_pct = round(100 * with_data / total_occupations, 1),
+          last_updated = as.Date(last_updated)
+        ) %>%
+        select(data_year, total_occupations, with_data, coverage_pct, last_updated) %>%
+        setNames(c("Year", "Total Occupations", "With Data", "Coverage %", "Last Updated"))
+      
+    }, error = function(e) {
+      data.frame(Error = paste("Failed to load data:", e$message))
+    })
+  }, options = list(pageLength = 10, dom = 't'), rownames = FALSE)
+  
+  # Refresh log table
+  output$refresh_log_table <- DT::renderDataTable({
+    tryCatch({
+      log_data <- get_refresh_log(db_pool, 20)
+      
+      if(nrow(log_data) > 0) {
+        log_data %>%
+          mutate(
+            success_rate = round(100 * occupations_successful / occupations_requested, 1),
+            duration_min = round(refresh_duration_seconds / 60, 2),
+            refresh_date = as.POSIXct(refresh_date)
+          ) %>%
+          select(refresh_date, data_year, occupation_set, occupations_requested, 
+                 occupations_successful, success_rate, refresh_status, duration_min) %>%
+          setNames(c("Refresh Date", "Year", "Occupation Set", "Requested", 
+                     "Successful", "Success %", "Status", "Duration (min)"))
+      } else {
+        data.frame(Message = "No refresh log data found")
+      }
+      
+    }, error = function(e) {
+      data.frame(Error = paste("Failed to load refresh log:", e$message))
+    })
+  }, options = list(pageLength = 15, scrollX = TRUE), rownames = FALSE)
+  
+  # Value boxes (same logic as original, but using database data)
   output$total_employment <- renderValueBox({
-    if(is.null(values$scm_data)) {
+    if(is.null(values$scm_data) || !values$analysis_complete) {
       valueBox(
-        value = "Click 'Run Analysis'",
+        value = "Click 'Load Data'",
         subtitle = "Total Employment",
         icon = icon("users"),
         color = "blue"
       )
     } else {
-      available_data <- values$scm_data %>% filter(data_available == TRUE)
-      total_emp <- sum(available_data$employment, na.rm = TRUE)
+      total_emp <- sum(values$scm_data$employment, na.rm = TRUE)
       
       valueBox(
         value = scales::comma(total_emp),
@@ -465,17 +532,16 @@ server <- function(input, output, session) {
   })
   
   output$median_wage <- renderValueBox({
-    if(is.null(values$scm_data)) {
+    if(is.null(values$scm_data) || !values$analysis_complete) {
       valueBox(
-        value = "Click 'Run Analysis'",
+        value = "Click 'Load Data'",
         subtitle = "Weighted Median Wage",
         icon = icon("dollar-sign"),
         color = "green"
       )
     } else {
-      available_data <- values$scm_data %>% filter(data_available == TRUE)
-      if(nrow(available_data) > 0) {
-        weighted_median <- weighted.mean(available_data$median_wage, available_data$employment, na.rm = TRUE)
+      if(nrow(values$scm_data) > 0) {
+        weighted_median <- weighted.mean(values$scm_data$median_wage, values$scm_data$employment, na.rm = TRUE)
         
         valueBox(
           value = scales::dollar(weighted_median, accuracy = 1),
@@ -495,19 +561,18 @@ server <- function(input, output, session) {
   })
   
   output$occupations_analyzed <- renderValueBox({
-    if(is.null(values$scm_data)) {
+    if(is.null(values$scm_data) || !values$analysis_complete) {
       valueBox(
-        value = "Click 'Run Analysis'",
+        value = "Click 'Load Data'",
         subtitle = "Occupations with Data",
         icon = icon("chart-bar"),
         color = "yellow"
       )
     } else {
-      data_count <- sum(values$scm_data$data_available)
-      total_count <- nrow(values$scm_data)
+      data_count <- nrow(values$scm_data)
       
       valueBox(
-        value = paste(data_count, "/", total_count),
+        value = data_count,
         subtitle = "Occupations with Data",
         icon = icon("chart-bar"),
         color = "yellow"
@@ -515,19 +580,17 @@ server <- function(input, output, session) {
     }
   })
   
-  # Salary by level plot
+  # All the visualization outputs (same as original app)
   output$salary_by_level_plot <- renderPlotly({
-    if(is.null(values$scm_data)) {
-      return(plot_ly() %>% add_annotations(text = "Run analysis to see data", showarrow = FALSE))
+    if(is.null(values$scm_data) || !values$analysis_complete) {
+      return(plot_ly() %>% add_annotations(text = "Load data to see visualization", showarrow = FALSE))
     }
     
-    available_data <- values$scm_data %>% filter(data_available == TRUE)
-    
-    if(nrow(available_data) == 0) {
+    if(nrow(values$scm_data) == 0) {
       return(plot_ly() %>% add_annotations(text = "No data available", showarrow = FALSE))
     }
     
-    p <- available_data %>%
+    p <- values$scm_data %>%
       plot_ly(x = ~occupation_level, y = ~median_wage, type = "box",
               text = ~paste("Occupation:", occupation_name, 
                             "<br>Median Wage:", scales::dollar(median_wage),
@@ -540,19 +603,16 @@ server <- function(input, output, session) {
     p
   })
   
-  # Employment pie chart
   output$employment_pie <- renderPlotly({
-    if(is.null(values$scm_data)) {
-      return(plot_ly() %>% add_annotations(text = "Run analysis to see data", showarrow = FALSE))
+    if(is.null(values$scm_data) || !values$analysis_complete) {
+      return(plot_ly() %>% add_annotations(text = "Load data to see visualization", showarrow = FALSE))
     }
     
-    available_data <- values$scm_data %>% filter(data_available == TRUE)
-    
-    if(nrow(available_data) == 0) {
+    if(nrow(values$scm_data) == 0) {
       return(plot_ly() %>% add_annotations(text = "No data available", showarrow = FALSE))
     }
     
-    pie_data <- available_data %>%
+    pie_data <- values$scm_data %>%
       group_by(occupation_level) %>%
       summarise(total_employment = sum(employment, na.rm = TRUE), .groups = 'drop')
     
@@ -565,15 +625,12 @@ server <- function(input, output, session) {
     p
   })
   
-  # Top occupations table
   output$top_occupations_table <- DT::renderDataTable({
-    if(is.null(values$scm_data)) {
-      return(data.frame(Message = "Run analysis to see data"))
+    if(is.null(values$scm_data) || !values$analysis_complete) {
+      return(data.frame(Message = "Load data to see results"))
     }
     
-    available_data <- values$scm_data %>% 
-      filter(data_available == TRUE) %>%
-      arrange(desc(median_wage)) %>%
+    display_data <- values$scm_data %>%
       head(10) %>%
       select(occupation_name, occupation_level, employment, median_wage, mean_wage, wage_distribution) %>%
       mutate(
@@ -582,21 +639,19 @@ server <- function(input, output, session) {
         mean_wage = scales::dollar(mean_wage)
       )
     
-    names(available_data) <- c("Occupation", "Level", "Employment", "Median Wage", "Mean Wage", "Distribution")
+    names(display_data) <- c("Occupation", "Level", "Employment", "Median Wage", "Mean Wage", "Distribution")
     
-    DT::datatable(available_data, 
+    DT::datatable(display_data, 
                   options = list(pageLength = 10, dom = 't'),
                   rownames = FALSE)
   })
   
-  # Detailed table
   output$detailed_table <- DT::renderDataTable({
-    if(is.null(values$scm_data)) {
-      return(data.frame(Message = "Run analysis to see data"))
+    if(is.null(values$scm_data) || !values$analysis_complete) {
+      return(data.frame(Message = "Load data to see results"))
     }
     
     display_data <- values$scm_data %>%
-      filter(data_available == TRUE) %>%
       select(occupation_code, occupation_name, occupation_level, scm_function, 
              employment, median_wage, mean_wage, median_hourly, wage_distribution) %>%
       mutate(
@@ -614,14 +669,13 @@ server <- function(input, output, session) {
                   rownames = FALSE)
   })
   
-  # Comparison selector
+  # Comparison functionality
   output$comparison_selector <- renderUI({
-    if(is.null(values$scm_data)) {
-      return(p("Run analysis first to enable comparisons"))
+    if(is.null(values$scm_data) || !values$analysis_complete) {
+      return(p("Load data first to enable comparisons"))
     }
     
-    available_data <- values$scm_data %>% filter(data_available == TRUE)
-    choices <- setNames(available_data$occupation_code, available_data$occupation_name)
+    choices <- setNames(values$scm_data$occupation_code, values$scm_data$occupation_name)
     
     selectInput("occupations_to_compare", "Select Occupations to Compare:",
                 choices = choices,
@@ -629,18 +683,17 @@ server <- function(input, output, session) {
                 selected = head(names(choices), 3))
   })
   
-  # Comparison table
   comparison_data <- eventReactive(input$compare_btn, {
     req(input$occupations_to_compare)
     
     values$scm_data %>%
-      filter(occupation_code %in% input$occupations_to_compare, data_available == TRUE) %>%
+      filter(occupation_code %in% input$occupations_to_compare) %>%
       arrange(desc(median_wage))
   })
   
   output$comparison_table <- DT::renderDataTable({
-    if(is.null(values$scm_data)) {
-      return(data.frame(Message = "Run analysis first"))
+    if(is.null(values$scm_data) || !values$analysis_complete) {
+      return(data.frame(Message = "Load data first"))
     }
     
     if(input$compare_btn == 0) {
@@ -660,12 +713,8 @@ server <- function(input, output, session) {
     DT::datatable(comp_data, options = list(dom = 't'), rownames = FALSE)
   })
   
-  # Additional plots and download handlers would go here...
-  # (I'll include a few key ones)
-  
-  # Comparison chart
   output$comparison_chart <- renderPlotly({
-    if(is.null(values$scm_data) || input$compare_btn == 0) {
+    if(is.null(values$scm_data) || !values$analysis_complete || input$compare_btn == 0) {
       return(plot_ly() %>% add_annotations(text = "Select occupations to compare", showarrow = FALSE))
     }
     
@@ -684,13 +733,49 @@ server <- function(input, output, session) {
     p
   })
   
+  # Additional plots
+  output$salary_employment_scatter <- renderPlotly({
+    if(is.null(values$scm_data) || !values$analysis_complete) {
+      return(plot_ly() %>% add_annotations(text = "Load data to see visualization", showarrow = FALSE))
+    }
+    
+    p <- values$scm_data %>%
+      plot_ly(x = ~employment, y = ~median_wage, color = ~occupation_level,
+              text = ~occupation_name,
+              hovertemplate = "%{text}<br>Employment: %{x:,}<br>Median Wage: %{y:$,.0f}<extra></extra>") %>%
+      add_markers(size = ~median_wage, sizes = c(10, 30)) %>%
+      layout(title = "Employment vs Median Wage by Occupation Level",
+             xaxis = list(title = "Employment", type = "log"),
+             yaxis = list(title = "Median Wage ($)", tickformat = "$,.0f"))
+    
+    p
+  })
+  
+  output$wage_distribution_plot <- renderPlotly({
+    if(is.null(values$scm_data) || !values$analysis_complete) {
+      return(plot_ly() %>% add_annotations(text = "Load data to see visualization", showarrow = FALSE))
+    }
+    
+    p <- values$scm_data %>%
+      plot_ly(x = ~wage_distribution, type = "histogram",
+              text = ~paste("Count:", ..count..),
+              hovertemplate = "%{text}<extra></extra>") %>%
+      layout(title = "Distribution of Wage Patterns",
+             xaxis = list(title = "Wage Distribution Pattern"),
+             yaxis = list(title = "Number of Occupations"))
+    
+    p
+  })
+  
   # Download handlers
   output$download_full <- downloadHandler(
     filename = function() {
       paste0("scm_salary_analysis_", input$analysis_year, "_", Sys.Date(), ".csv")
     },
     content = function(file) {
-      write_csv(values$scm_data, file)
+      if(!is.null(values$scm_data)) {
+        write_csv(values$scm_data, file)
+      }
     }
   )
   
@@ -701,7 +786,6 @@ server <- function(input, output, session) {
     content = function(file) {
       if(!is.null(values$scm_data)) {
         summary_data <- values$scm_data %>%
-          filter(data_available == TRUE) %>%
           group_by(occupation_level) %>%
           summarise(
             occupations_count = n(),
@@ -715,6 +799,57 @@ server <- function(input, output, session) {
       }
     }
   )
+  
+  output$download_custom <- downloadHandler(
+    filename = function() {
+      paste0("scm_custom_report_", input$analysis_year, "_", Sys.Date(), ".html")
+    },
+    content = function(file) {
+      if(!is.null(values$scm_data)) {
+        # Create a simple HTML report
+        report_content <- paste0(
+          "<html><head><title>SCM Salary Report - ", input$analysis_year, "</title></head><body>",
+          "<h1>Supply Chain Management Salary Analysis Report</h1>",
+          "<h2>Year: ", input$analysis_year, "</h2>",
+          "<h2>Generated: ", Sys.Date(), "</h2>",
+          "<h3>Summary Statistics</h3>",
+          "<p>Total Occupations Analyzed: ", nrow(values$scm_data), "</p>",
+          "<p>Total Employment: ", scales::comma(sum(values$scm_data$employment, na.rm = TRUE)), "</p>",
+          "<p>Weighted Average Median Wage: ", scales::dollar(weighted.mean(values$scm_data$median_wage, values$scm_data$employment, na.rm = TRUE)), "</p>",
+          "</body></html>"
+        )
+        writeLines(report_content, file)
+      }
+    }
+  )
+  
+  output$export_preview <- DT::renderDataTable({
+    if(is.null(values$scm_data) || !values$analysis_complete) {
+      return(data.frame(Message = "Load data to see preview"))
+    }
+    
+    preview_data <- values$scm_data %>%
+      head(20) %>%
+      select(occupation_name, occupation_level, employment, median_wage, mean_wage) %>%
+      mutate(
+        employment = scales::comma(employment),
+        median_wage = scales::dollar(median_wage),
+        mean_wage = scales::dollar(mean_wage)
+      )
+    
+    names(preview_data) <- c("Occupation", "Level", "Employment", "Median Wage", "Mean Wage")
+    
+    DT::datatable(preview_data, 
+                  options = list(pageLength = 20, scrollX = TRUE),
+                  rownames = FALSE)
+  })
+  
+  # Clean up database pool on session end
+  session$onSessionEnded(function() {
+    if(exists("db_pool")) {
+      poolClose(db_pool)
+    }
+  })
 }
 
 # Run the app
