@@ -1,16 +1,31 @@
 # SCM Salary Analysis Shiny App
 # Interactive dashboard for Supply Chain Management salary data from BLS
 
-# Load required libraries
-# All packages should be pre-installed before deployment
+# Load required libraries with GitHub package handling
 library(shiny)
 library(shinydashboard)
 library(DT)
 library(plotly)
-library(blsAPI)
 library(tidyverse)
 library(jsonlite)
 library(scales)
+
+# Handle blsAPI installation for Connect Cloud
+if (!requireNamespace("blsAPI", quietly = TRUE)) {
+  # Only try to install if we have devtools and internet access
+  if (requireNamespace("devtools", quietly = TRUE)) {
+    tryCatch({
+      devtools::install_github("mikeasilva/blsAPI", quiet = TRUE)
+      library(blsAPI)
+    }, error = function(e) {
+      stop("Unable to install blsAPI package. Please contact administrator.")
+    })
+  } else {
+    stop("blsAPI package not available and devtools not found.")
+  }
+} else {
+  library(blsAPI)
+}
 
 # Load API key from environment variable
 # Set BLS_KEY environment variable in Posit Connect Cloud
@@ -371,7 +386,7 @@ server <- function(input, output, session) {
   observeEvent(input$analyze_btn, {
     if(Sys.getenv("BLS_KEY") == "") {
       showNotification("BLS API key not found. Please set BLS_KEY environment variable.", 
-                       type = "error", duration = 10)
+                       type = "message", duration = 10)
       return()
     }
     
@@ -424,7 +439,7 @@ server <- function(input, output, session) {
     values$scm_data <- processed_data
     values$analysis_complete <- TRUE
     
-    showNotification("Analysis complete!", type = "success")
+    showNotification("Analysis complete!", type = "message")
   })
   
   # Value boxes
