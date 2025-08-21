@@ -1,15 +1,37 @@
 # SCM Salary Analysis Shiny App
 # Interactive dashboard for Supply Chain Management salary data from BLS
 
-# Load required libraries
-library(shiny)
-library(shinydashboard)
-library(DT)
-library(plotly)
-library(blsAPI)
-library(tidyverse)
-library(jsonlite)
-library(scales)
+# Install and load required libraries with robust error handling
+install_and_load <- function(package_name, github_repo = NULL) {
+  if (!require(package_name, character.only = TRUE, quietly = TRUE)) {
+    if (!is.null(github_repo)) {
+      # GitHub package
+      if (!require(devtools, quietly = TRUE)) {
+        install.packages("devtools")
+        library(devtools)
+      }
+      message(paste("Installing", package_name, "from GitHub:", github_repo))
+      devtools::install_github(github_repo)
+    } else {
+      # CRAN package
+      message(paste("Installing", package_name, "from CRAN"))
+      install.packages(package_name)
+    }
+    library(package_name, character.only = TRUE)
+  } else {
+    library(package_name, character.only = TRUE)
+  }
+}
+
+# Install/load packages
+install_and_load("shiny")
+install_and_load("shinydashboard")
+install_and_load("DT")
+install_and_load("plotly")
+install_and_load("blsAPI", "mikeasilva/blsAPI")  # GitHub package
+install_and_load("tidyverse")
+install_and_load("jsonlite")
+install_and_load("scales")
 
 # Load API key from environment variable
 # Set BLS_KEY environment variable in Posit Connect Cloud
@@ -209,150 +231,150 @@ ui <- dashboardPage(
     tabItems(
       # Overview Tab
       tabItem(tabName = "overview",
-        fluidRow(
-          box(
-            title = "Analysis Controls", status = "primary", solidHeader = TRUE, width = 12,
-            fluidRow(
-              column(3,
-                numericInput("analysis_year", "Analysis Year:", 
-                           value = 2024, min = 2015, max = 2024)
+              fluidRow(
+                box(
+                  title = "Analysis Controls", status = "primary", solidHeader = TRUE, width = 12,
+                  fluidRow(
+                    column(3,
+                           numericInput("analysis_year", "Analysis Year:", 
+                                        value = 2024, min = 2015, max = 2024)
+                    ),
+                    column(3,
+                           selectInput("occupation_set", "Occupation Set:",
+                                       choices = list(
+                                         "Core SCM Only" = "core",
+                                         "Extended SCM" = "extended",
+                                         "Both Core & Extended" = "both"
+                                       ),
+                                       selected = "core")
+                    ),
+                    column(3,
+                           br(),
+                           actionButton("analyze_btn", "Run Analysis", 
+                                        class = "btn-primary", style = "margin-top: 5px;")
+                    ),
+                    column(3,
+                           br(),
+                           downloadButton("download_report", "Download Report", 
+                                          class = "btn-success", style = "margin-top: 5px;")
+                    )
+                  )
+                )
               ),
-              column(3,
-                selectInput("occupation_set", "Occupation Set:",
-                           choices = list(
-                             "Core SCM Only" = "core",
-                             "Extended SCM" = "extended",
-                             "Both Core & Extended" = "both"
-                           ),
-                           selected = "core")
+              
+              fluidRow(
+                valueBoxOutput("total_employment"),
+                valueBoxOutput("median_wage"),
+                valueBoxOutput("occupations_analyzed")
               ),
-              column(3,
-                br(),
-                actionButton("analyze_btn", "Run Analysis", 
-                           class = "btn-primary", style = "margin-top: 5px;")
+              
+              fluidRow(
+                box(
+                  title = "Salary Distribution by Occupation Level", 
+                  status = "primary", solidHeader = TRUE, width = 8,
+                  plotlyOutput("salary_by_level_plot")
+                ),
+                box(
+                  title = "Employment Distribution", 
+                  status = "info", solidHeader = TRUE, width = 4,
+                  plotlyOutput("employment_pie")
+                )
               ),
-              column(3,
-                br(),
-                downloadButton("download_report", "Download Report", 
-                             class = "btn-success", style = "margin-top: 5px;")
+              
+              fluidRow(
+                box(
+                  title = "Top 10 Highest Paying SCM Occupations",
+                  status = "success", solidHeader = TRUE, width = 12,
+                  DT::dataTableOutput("top_occupations_table")
+                )
               )
-            )
-          )
-        ),
-        
-        fluidRow(
-          valueBoxOutput("total_employment"),
-          valueBoxOutput("median_wage"),
-          valueBoxOutput("occupations_analyzed")
-        ),
-        
-        fluidRow(
-          box(
-            title = "Salary Distribution by Occupation Level", 
-            status = "primary", solidHeader = TRUE, width = 8,
-            plotlyOutput("salary_by_level_plot")
-          ),
-          box(
-            title = "Employment Distribution", 
-            status = "info", solidHeader = TRUE, width = 4,
-            plotlyOutput("employment_pie")
-          )
-        ),
-        
-        fluidRow(
-          box(
-            title = "Top 10 Highest Paying SCM Occupations",
-            status = "success", solidHeader = TRUE, width = 12,
-            DT::dataTableOutput("top_occupations_table")
-          )
-        )
       ),
       
       # Detailed Analysis Tab
       tabItem(tabName = "detailed",
-        fluidRow(
-          box(
-            title = "Detailed Occupation Data", 
-            status = "primary", solidHeader = TRUE, width = 12,
-            DT::dataTableOutput("detailed_table")
-          )
-        ),
-        
-        fluidRow(
-          box(
-            title = "Salary vs Employment Scatter Plot",
-            status = "info", solidHeader = TRUE, width = 6,
-            plotlyOutput("salary_employment_scatter")
-          ),
-          box(
-            title = "Wage Distribution Analysis",
-            status = "warning", solidHeader = TRUE, width = 6,
-            plotlyOutput("wage_distribution_plot")
-          )
-        )
+              fluidRow(
+                box(
+                  title = "Detailed Occupation Data", 
+                  status = "primary", solidHeader = TRUE, width = 12,
+                  DT::dataTableOutput("detailed_table")
+                )
+              ),
+              
+              fluidRow(
+                box(
+                  title = "Salary vs Employment Scatter Plot",
+                  status = "info", solidHeader = TRUE, width = 6,
+                  plotlyOutput("salary_employment_scatter")
+                ),
+                box(
+                  title = "Wage Distribution Analysis",
+                  status = "warning", solidHeader = TRUE, width = 6,
+                  plotlyOutput("wage_distribution_plot")
+                )
+              )
       ),
       
       # Comparisons Tab
       tabItem(tabName = "comparisons",
-        fluidRow(
-          box(
-            title = "Compare Occupations", 
-            status = "primary", solidHeader = TRUE, width = 4,
-            uiOutput("comparison_selector"),
-            br(),
-            actionButton("compare_btn", "Compare Selected", class = "btn-info")
-          ),
-          box(
-            title = "Comparison Results",
-            status = "success", solidHeader = TRUE, width = 8,
-            DT::dataTableOutput("comparison_table")
-          )
-        ),
-        
-        fluidRow(
-          box(
-            title = "Salary Comparison Chart",
-            status = "info", solidHeader = TRUE, width = 12,
-            plotlyOutput("comparison_chart")
-          )
-        )
+              fluidRow(
+                box(
+                  title = "Compare Occupations", 
+                  status = "primary", solidHeader = TRUE, width = 4,
+                  uiOutput("comparison_selector"),
+                  br(),
+                  actionButton("compare_btn", "Compare Selected", class = "btn-info")
+                ),
+                box(
+                  title = "Comparison Results",
+                  status = "success", solidHeader = TRUE, width = 8,
+                  DT::dataTableOutput("comparison_table")
+                )
+              ),
+              
+              fluidRow(
+                box(
+                  title = "Salary Comparison Chart",
+                  status = "info", solidHeader = TRUE, width = 12,
+                  plotlyOutput("comparison_chart")
+                )
+              )
       ),
       
       # Data Export Tab
       tabItem(tabName = "export",
-        fluidRow(
-          box(
-            title = "Export Options", 
-            status = "primary", solidHeader = TRUE, width = 12,
-            h4("Available Downloads:"),
-            br(),
-            fluidRow(
-              column(4,
-                h5("Complete Analysis Data"),
-                p("Full dataset with all calculated fields"),
-                downloadButton("download_full", "Download CSV", class = "btn-primary")
+              fluidRow(
+                box(
+                  title = "Export Options", 
+                  status = "primary", solidHeader = TRUE, width = 12,
+                  h4("Available Downloads:"),
+                  br(),
+                  fluidRow(
+                    column(4,
+                           h5("Complete Analysis Data"),
+                           p("Full dataset with all calculated fields"),
+                           downloadButton("download_full", "Download CSV", class = "btn-primary")
+                    ),
+                    column(4,
+                           h5("Summary by Level"),
+                           p("Aggregated data by occupation level"),
+                           downloadButton("download_summary", "Download CSV", class = "btn-success")
+                    ),
+                    column(4,
+                           h5("Custom Report"),
+                           p("Formatted report with insights"),
+                           downloadButton("download_custom", "Download Report", class = "btn-info")
+                    )
+                  )
+                )
               ),
-              column(4,
-                h5("Summary by Level"),
-                p("Aggregated data by occupation level"),
-                downloadButton("download_summary", "Download CSV", class = "btn-success")
-              ),
-              column(4,
-                h5("Custom Report"),
-                p("Formatted report with insights"),
-                downloadButton("download_custom", "Download Report", class = "btn-info")
+              
+              fluidRow(
+                box(
+                  title = "Data Preview", 
+                  status = "info", solidHeader = TRUE, width = 12,
+                  DT::dataTableOutput("export_preview")
+                )
               )
-            )
-          )
-        ),
-        
-        fluidRow(
-          box(
-            title = "Data Preview", 
-            status = "info", solidHeader = TRUE, width = 12,
-            DT::dataTableOutput("export_preview")
-          )
-        )
       )
     )
   )
@@ -370,7 +392,7 @@ server <- function(input, output, session) {
   observeEvent(input$analyze_btn, {
     if(Sys.getenv("BLS_KEY") == "") {
       showNotification("BLS API key not found. Please set BLS_KEY environment variable.", 
-                      type = "error", duration = 10)
+                       type = "error", duration = 10)
       return()
     }
     
@@ -381,9 +403,9 @@ server <- function(input, output, session) {
     
     # Determine which occupations to analyze
     occupations_to_use <- switch(input$occupation_set,
-      "core" = scm_occupations,
-      "extended" = extended_scm_occupations,
-      "both" = c(scm_occupations, extended_scm_occupations)
+                                 "core" = scm_occupations,
+                                 "extended" = extended_scm_occupations,
+                                 "both" = c(scm_occupations, extended_scm_occupations)
     )
     
     # Analyze occupations
@@ -514,8 +536,8 @@ server <- function(input, output, session) {
     p <- available_data %>%
       plot_ly(x = ~occupation_level, y = ~median_wage, type = "box",
               text = ~paste("Occupation:", occupation_name, 
-                          "<br>Median Wage:", scales::dollar(median_wage),
-                          "<br>Employment:", scales::comma(employment)),
+                            "<br>Median Wage:", scales::dollar(median_wage),
+                            "<br>Employment:", scales::comma(employment)),
               hovertemplate = "%{text}<extra></extra>") %>%
       layout(title = "Median Wage Distribution by Occupation Level",
              xaxis = list(title = "Occupation Level"),
@@ -591,7 +613,7 @@ server <- function(input, output, session) {
       )
     
     names(display_data) <- c("Code", "Occupation", "Level", "Function", "Employment", 
-                           "Median Wage", "Mean Wage", "Median Hourly", "Distribution")
+                             "Median Wage", "Mean Wage", "Median Hourly", "Distribution")
     
     DT::datatable(display_data, 
                   options = list(pageLength = 15, scrollX = TRUE),
