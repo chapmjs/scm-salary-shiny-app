@@ -31,7 +31,33 @@ check_db_config <- function() {
   return(TRUE)
 }
 
-# Create simple database connection
+# Simple connection test function
+test_db_connection_simple <- function() {
+  tryCatch({
+    conn <- get_db_connection()
+    on.exit(dbDisconnect(conn))
+    
+    # Test basic query
+    result <- dbGetQuery(conn, "SELECT 1 as test_value")
+    
+    # Test table access
+    tables <- dbListTables(conn)
+    
+    return(list(
+      success = TRUE,
+      tables = tables,
+      table_count = length(tables)
+    ))
+    
+  }, error = function(e) {
+    return(list(
+      success = FALSE,
+      error = e$message
+    ))
+  })
+}
+
+# Create simple database connection with MariaDB compatibility
 get_db_connection <- function() {
   check_db_config()
   
@@ -43,6 +69,13 @@ get_db_connection <- function() {
       username = DB_CONFIG$username,
       password = DB_CONFIG$password
     )
+    
+    # Test the connection with a simple query
+    test_result <- dbGetQuery(conn, "SELECT 1 as test_value")
+    if(test_result$test_value != 1) {
+      stop("Connection test failed")
+    }
+    
     return(conn)
   }, error = function(e) {
     stop(paste("Failed to create database connection:", e$message))
