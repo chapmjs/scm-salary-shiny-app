@@ -10,7 +10,6 @@ library(tidyverse)
 library(scales)
 library(RMySQL)
 library(DBI)
-library(pool)
 
 # Database configuration
 DB_CONFIG <- list(
@@ -32,47 +31,55 @@ check_db_config <- function() {
   return(TRUE)
 }
 
-# Create database connection pool
-create_db_pool <- function() {
+# Create simple database connection
+get_db_connection <- function() {
   check_db_config()
   
   tryCatch({
-    pool <- dbPool(
-      drv = MySQL(),
+    conn <- dbConnect(
+      MySQL(),
       host = DB_CONFIG$host,
       dbname = DB_CONFIG$dbname,
       username = DB_CONFIG$username,
-      password = DB_CONFIG$password,
-      maxSize = 10
+      password = DB_CONFIG$password
     )
-    return(pool)
+    return(conn)
   }, error = function(e) {
-    stop(paste("Failed to create database connection pool:", e$message))
+    stop(paste("Failed to create database connection:", e$message))
   })
 }
 
-# Database query functions with proper pool management
-get_available_years <- function(pool) {
+# Database query functions with direct connections
+get_available_years <- function() {
+  conn <- get_db_connection()
+  on.exit(dbDisconnect(conn))
+  
   query <- "SELECT DISTINCT data_year FROM scm_salary_data ORDER BY data_year DESC"
   tryCatch({
-    result <- pool::dbGetQuery(pool, query)
+    result <- dbGetQuery(conn, query)
     return(result$data_year)
   }, error = function(e) {
     stop(paste("Error getting available years:", e$message))
   })
 }
 
-get_occupation_categories <- function(pool) {
+get_occupation_categories <- function() {
+  conn <- get_db_connection()
+  on.exit(dbDisconnect(conn))
+  
   query <- "SELECT DISTINCT occupation_category FROM occupation_definitions WHERE is_active = TRUE"
   tryCatch({
-    result <- pool::dbGetQuery(pool, query)
+    result <- dbGetQuery(conn, query)
     return(result$occupation_category)
   }, error = function(e) {
     stop(paste("Error getting occupation categories:", e$message))
   })
 }
 
-get_scm_data_from_db <- function(pool, year, occupation_set = "both") {
+get_scm_data_from_db <- function(year, occupation_set = "both") {
+  conn <- get_db_connection()
+  on.exit(dbDisconnect(conn))
+  
   # Build the occupation filter
   if (occupation_set == "both") {
     occupation_filter <- ""
@@ -105,7 +112,7 @@ get_scm_data_from_db <- function(pool, year, occupation_set = "both") {
   ")
   
   tryCatch({
-    result <- pool::dbGetQuery(pool, query)
+    result <- dbGetQuery(conn, query)
     
     # Convert data types and add calculated fields
     result <- result %>%
@@ -146,7 +153,10 @@ get_scm_data_from_db <- function(pool, year, occupation_set = "both") {
   })
 }
 
-get_refresh_log <- function(pool, limit = 10) {
+get_refresh_log <- function(limit = 10) {
+  conn <- get_db_connection()
+  on.exit(dbDisconnect(conn))
+  
   query <- paste0("
     SELECT 
       data_year,
@@ -161,15 +171,15 @@ get_refresh_log <- function(pool, limit = 10) {
     LIMIT ", limit)
   
   tryCatch({
-    result <- pool::dbGetQuery(pool, query)
+    result <- dbGetQuery(conn, query)
     return(result)
   }, error = function(e) {
     stop(paste("Error getting refresh log:", e$message))
   })
 }
 
-# Create database pool
-db_pool <- create_db_pool()
+# Remove pool creation - no longer needed
+# db_pool <- create_db_pool()
 
 # UI
 ui <- dashboardPage(
@@ -376,8 +386,8 @@ server <- function(input, output, session) {
   # Initialize available years and categories
   observe({
     tryCatch({
-      values$available_years <- get_available_years(db_pool)
-      values$available_categories <- get_occupation_categories(db_pool)
+      values$available_years <- get_available_years()
+      values$available_categories <- get_occupation_categories()
     }, error = function(e) {
       showNotification(paste("Database connection error:", e$message), type = "error")
     })
@@ -420,7 +430,7 @@ server <- function(input, output, session) {
     
     tryCatch({
       # Load data from database
-      raw_data <- get_scm_data_from_db(db_pool, input$analysis_year, input$occupation_set)
+      raw_data <- get_scm_data_from_db(input$analysis_year, input$occupation_set)
       
       if(nrow(raw_data) == 0) {
         showNotification(paste("No data found for year", input$analysis_year, "and occupation set", input$occupation_set), 
@@ -447,11 +457,14 @@ server <- function(input, output, session) {
   output$db_status <- renderText({
     tryCatch({
       # Test database connection
-      test_query <- pool::dbGetQuery(db_pool, "SELECT COUNT(*) as count FROM occupation_definitions")
+      conn <- get_db_connection()
+      on.exit(dbDisconnect(conn))
+      
+      test_query <- dbGetQuery(conn, "SELECT COUNT(*) as count FROM occupation_definitions")
       occupation_count <- test_query$count
       
       # Get data summary
-      summary_query <- pool::dbGetQuery(db_pool, "
+      summary_query <- dbGetQuery(conn, "
         SELECT 
           COUNT(DISTINCT data_year) as years_available,
           COUNT(*) as total_records,
@@ -476,6 +489,9 @@ server <- function(input, output, session) {
   # Available years table
   output$available_years_table <- DT::renderDataTable({
     tryCatch({
+      conn <- get_db_connection()
+      on.exit(dbDisconnect(conn))
+      
       query <- "
         SELECT 
           data_year,
@@ -486,7 +502,7 @@ server <- function(input, output, session) {
         GROUP BY data_year 
         ORDER BY data_year DESC
       "
-      result <- pool::dbGetQuery(db_pool, query)
+      result <- dbGetQuery(conn, query)
       
       result %>%
         mutate(
