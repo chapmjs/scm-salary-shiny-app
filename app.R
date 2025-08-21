@@ -51,17 +51,25 @@ create_db_pool <- function() {
   })
 }
 
-# Database query functions
+# Database query functions with proper pool management
 get_available_years <- function(pool) {
   query <- "SELECT DISTINCT data_year FROM scm_salary_data ORDER BY data_year DESC"
-  result <- dbGetQuery(pool, query)
-  return(result$data_year)
+  tryCatch({
+    result <- pool::dbGetQuery(pool, query)
+    return(result$data_year)
+  }, error = function(e) {
+    stop(paste("Error getting available years:", e$message))
+  })
 }
 
 get_occupation_categories <- function(pool) {
   query <- "SELECT DISTINCT occupation_category FROM occupation_definitions WHERE is_active = TRUE"
-  result <- dbGetQuery(pool, query)
-  return(result$occupation_category)
+  tryCatch({
+    result <- pool::dbGetQuery(pool, query)
+    return(result$occupation_category)
+  }, error = function(e) {
+    stop(paste("Error getting occupation categories:", e$message))
+  })
 }
 
 get_scm_data_from_db <- function(pool, year, occupation_set = "both") {
@@ -96,42 +104,46 @@ get_scm_data_from_db <- function(pool, year, occupation_set = "both") {
     ORDER BY sd.median_wage DESC
   ")
   
-  result <- dbGetQuery(pool, query)
-  
-  # Convert data types and add calculated fields
-  result <- result %>%
-    mutate(
-      employment = as.numeric(employment),
-      median_wage = as.numeric(median_wage),
-      mean_wage = as.numeric(mean_wage),
-      median_hourly = as.numeric(median_hourly),
-      mean_hourly = as.numeric(mean_hourly),
-      wage_ratio = as.numeric(wage_ratio),
-      data_available = as.logical(data_available),
-      # Add occupation level if not in database
-      occupation_level = case_when(
-        !is.na(occupation_level) ~ occupation_level,
-        str_detect(occupation_code, "^11-") ~ "Management",
-        str_detect(occupation_code, "^13-1081|^13-1023|^13-1022|^13-1199") ~ "Core SCM Professional",
-        str_detect(occupation_code, "^13-1111|^15-2031|^17-2112") ~ "SCM-Adjacent Analytical",
-        str_detect(occupation_code, "^43-|^53-") ~ "Operational/Support",
-        TRUE ~ "Other"
-      ),
-      # Add SCM function if not in database
-      scm_function = case_when(
-        !is.na(scm_function) ~ scm_function,
-        str_detect(occupation_code, "^11-3061|^13-1023|^13-1022") ~ "Procurement & Sourcing",
-        str_detect(occupation_code, "^11-3071|^43-5011|^43-5071|^53-1047") ~ "Transportation & Logistics",
-        str_detect(occupation_code, "^13-1081") ~ "Supply Chain Planning",
-        str_detect(occupation_code, "^43-5061") ~ "Production Planning",
-        str_detect(occupation_code, "^13-1199") ~ "Supply Chain Analysis",
-        str_detect(occupation_code, "^13-1111|^15-2031|^17-2112") ~ "Process Optimization",
-        str_detect(occupation_code, "^11-9199") ~ "General Operations",
-        TRUE ~ "Other SCM Functions"
+  tryCatch({
+    result <- pool::dbGetQuery(pool, query)
+    
+    # Convert data types and add calculated fields
+    result <- result %>%
+      mutate(
+        employment = as.numeric(employment),
+        median_wage = as.numeric(median_wage),
+        mean_wage = as.numeric(mean_wage),
+        median_hourly = as.numeric(median_hourly),
+        mean_hourly = as.numeric(mean_hourly),
+        wage_ratio = as.numeric(wage_ratio),
+        data_available = as.logical(data_available),
+        # Add occupation level if not in database
+        occupation_level = case_when(
+          !is.na(occupation_level) ~ occupation_level,
+          str_detect(occupation_code, "^11-") ~ "Management",
+          str_detect(occupation_code, "^13-1081|^13-1023|^13-1022|^13-1199") ~ "Core SCM Professional",
+          str_detect(occupation_code, "^13-1111|^15-2031|^17-2112") ~ "SCM-Adjacent Analytical",
+          str_detect(occupation_code, "^43-|^53-") ~ "Operational/Support",
+          TRUE ~ "Other"
+        ),
+        # Add SCM function if not in database
+        scm_function = case_when(
+          !is.na(scm_function) ~ scm_function,
+          str_detect(occupation_code, "^11-3061|^13-1023|^13-1022") ~ "Procurement & Sourcing",
+          str_detect(occupation_code, "^11-3071|^43-5011|^43-5071|^53-1047") ~ "Transportation & Logistics",
+          str_detect(occupation_code, "^13-1081") ~ "Supply Chain Planning",
+          str_detect(occupation_code, "^43-5061") ~ "Production Planning",
+          str_detect(occupation_code, "^13-1199") ~ "Supply Chain Analysis",
+          str_detect(occupation_code, "^13-1111|^15-2031|^17-2112") ~ "Process Optimization",
+          str_detect(occupation_code, "^11-9199") ~ "General Operations",
+          TRUE ~ "Other SCM Functions"
+        )
       )
-    )
-  
-  return(result)
+    
+    return(result)
+  }, error = function(e) {
+    stop(paste("Error getting SCM data:", e$message))
+  })
 }
 
 get_refresh_log <- function(pool, limit = 10) {
@@ -148,8 +160,12 @@ get_refresh_log <- function(pool, limit = 10) {
     ORDER BY refresh_date DESC 
     LIMIT ", limit)
   
-  result <- dbGetQuery(pool, query)
-  return(result)
+  tryCatch({
+    result <- pool::dbGetQuery(pool, query)
+    return(result)
+  }, error = function(e) {
+    stop(paste("Error getting refresh log:", e$message))
+  })
 }
 
 # Create database pool
@@ -431,11 +447,11 @@ server <- function(input, output, session) {
   output$db_status <- renderText({
     tryCatch({
       # Test database connection
-      test_query <- dbGetQuery(db_pool, "SELECT COUNT(*) as count FROM occupation_definitions")
+      test_query <- pool::dbGetQuery(db_pool, "SELECT COUNT(*) as count FROM occupation_definitions")
       occupation_count <- test_query$count
       
       # Get data summary
-      summary_query <- dbGetQuery(db_pool, "
+      summary_query <- pool::dbGetQuery(db_pool, "
         SELECT 
           COUNT(DISTINCT data_year) as years_available,
           COUNT(*) as total_records,
@@ -470,7 +486,7 @@ server <- function(input, output, session) {
         GROUP BY data_year 
         ORDER BY data_year DESC
       "
-      result <- dbGetQuery(db_pool, query)
+      result <- pool::dbGetQuery(db_pool, query)
       
       result %>%
         mutate(
